@@ -1,0 +1,153 @@
+---
+- name: Basicsetup
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: “wait 200 sec for port 22 to become open and contain OPENSSH”
+      wait_for:
+       Port: 22
+       host: “{{ ansible_ssh_host|default(ansible_host))|default(inventory_hostname) }}”
+       search_regex: OpenSSH
+       delay: 10
+       timeout: 200
+      vars: 
+       ansible_connection: local 
+    - name: set a hostname
+      hostname:
+        name: "{{ node_hostname }}"
+    - name: copy /etc/hosts template
+      copy:
+        backup: true
+        src: ./files/hosts
+        dest: /tmp/hosts
+    - name: Insert/Update configuration using a local file and validate it
+      blockinfile:
+        block: "{{ lookup('file', './files/hosts') }}"
+        path: /etc/hosts
+        backup: yes
+    - name: Disable swap on all nodes
+      shell: swapoff -a
+    - name: kernel module prerequesites
+      shell:
+        cmd: |
+          cat << EOF | sudo tee /etc/modules-load.d/k8s.conf
+          overlay
+          br_netfiletr
+          EOF
+    - name: add overlay module
+      community.general.modprobe:
+        name: overlay
+        state: present
+    - name: add br_netfilter module
+      community.general.modprobe:
+        name: br_netfilter
+        state: present 
+    
+    - name: sysctl params required by setup
+      shell:
+         cmd: |
+          cat <<EOF | sudo tee /etc/sysctl/k8s.conf
+          net.bridge.bridge-nf-call-iptable = 1
+          net.bridge.bridge-nf-call-iptables = 1
+          net.ipv4.ip_forward
+          EOF
+
+    - name: apply sysctl para without rebot
+      shell: sysctl --system
+    - name: create container.d config file
+      shell: mkdir -p /etc/containerd && touch /etc/container
+    - name: Install containerd per-req
+      apt:
+        pkg: apt-transport-https ca-certificates curl software-properties-common
+    - name: add Docker GPG key
+      apt:
+        url: https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+        state: present
+    - name: Add docker repositiry
+      apt:
+        repo: deb https://download.docker.com/linux/ubuntu jammy stable
+        state: present
+    - name: update apt and instance docker-ce
+      apt:
+        name: docker-ce
+        state: present
+        update_cache: yes
+    - name: setup containerd to use systemd as cgroup
+      copy:
+        backup: true
+        src: ./files/containerd-config.toml
+        dest: /etc/containerd-config.toml
+    - name: Restart service in all cases aslo issue daemon reload
+      systemd:
+        state: restarted
+        daemon_reload: yes
+        name: containerd
+    - name: Download google cloud's publickey
+      apt:
+        url: https://packages.cloud.google.com/apt/doc/apt-get.gpg
+        state: present
+    - name: Add kubernetes repo
+      apt:
+        repo: deb https://apt-kubernetes.io/kubernetes-xenial main
+        state: present
+        filename: kubernetes
+    - name: Install kubernetes, kubectl,kubelet
+      apt:
+        pkg: 
+          -kubeadm 
+          -kubectl 
+          -kubelet
+    - name: kubectl,kubelet,kubeadm on hold state
+      shell: apt-mark hold kubelet kubectl kubeadm
+- name: setup master node
+  hosts: master
+  become: true
+  tasks:
+    - name: init kubeadm
+      shell: sudo kubeadm init --pod-network-cidr=10.244.0.0/16 --control-plane-endpoint "{{ansible-host}}:6443"
+    - name: create ~/.kube directory
+      file:
+        path: ~/.kube
+        state: direcory
+        mode: "0755"
+    - name: copy kubeconfig file
+      shell: sudo cp -i /etc/kubernetes/admin.config $HOME/.kube/config
+    - name: settng correct permission for kubeconfig file
+      shell: sudo chown $(id -u):$(id -g) $HOME/.kube/config
+    - name: install flannel
+      shell: 
+    - name: copy kubeconfig file locally
+      fetch:
+        src: $HOME/.kube/config
+        dest: /tmp/kube/config
+        flat: yes
+    - name: Generate token id for master nodes
+      shell: sudo kubeadm token create --print-join-command
+      register: join_node_token
+    - name: save join command in a variabel
+      set_fact:
+        join_node: "{{join_node_token.stdout_lines[0]}}"
+- name: setup worker nodes
+  hosts: workers
+  become: true
+  tasks:
+   - name: add worker nodes to cluster
+     shell: sudo {{hostvars['contaol-plane'].join_node}}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
